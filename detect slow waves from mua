@@ -1,0 +1,149 @@
+function [SlowWaves] = DetectSlowWavesMUA(basePath, MUAchan, varargin)
+%% DetectSlowWavesMUA — HS 2025 Version (NO MUAfromDat)
+%
+% Uses your hs_filterMUA output (whatever*.MUA file) to detect UP/DOWN states.
+% The function:
+%   1. Auto-detects your MUA file
+%   2. Loads MUA.data + timestamps
+%   3. Smooths MUA
+%   4. Applies bz_BimodalThresh
+%   5. Saves UP/DOWN intervals and figures
+
+%% PARAMETERS
+p = inputParser;
+addParameter(p,'smoothwin',0.03);        % smoothing window (seconds)
+addParameter(p,'stickyTrigger',true);    % Schmidt triggering
+addParameter(p,'startbins',100);
+addParameter(p,'maxbins',100);
+addParameter(p,'diptestLog',true);
+addParameter(p,'pcheck',false);
+addParameter(p,'makeFig',true);
+addParameter(p,'saveEvent',true);
+addParameter(p,'refineDipEstimate',false);
+parse(p, varargin{:});
+
+smoothwin          = p.Results.smoothwin;
+stickyTrigger      = p.Results.stickyTrigger;
+startbins          = p.Results.startbins;
+maxbins            = p.Results.maxbins;
+diptestLog         = p.Results.diptestLog;
+pcheck             = p.Results.pcheck;
+makeFig            = p.Results.makeFig;
+saveEvent          = p.Results.saveEvent;
+refineDipEstimate  = p.Results.refineDipEstimate;
+
+baseName = bz_BasenameFromBasepath(basePath);
+
+%% ================================================================
+%   LOAD YOUR MUA FILE (auto-detect)
+% ================================================================
+disp('Searching for MUA file…');
+
+% Priority: *.MUA (your standard hs_filterMUA output)
+candidates = dir(fullfile(basePath,'*.MUA'));
+
+% Secondary: any MUA*.mat files
+if isempty(candidates)
+    candidates = dir(fullfile(basePath,'*MUA*.mat'));
+end
+
+if isempty(candidates)
+    error('No MUA file found in %s. Run hs_filterMUA first.', basePath);
+end
+
+MUAfile = fullfile(basePath, candidates(1).name);
+disp(['Loading: ' MUAfile]);
+load(MUAfile);   % loads struct MUA.data + MUA.timestamps
+
+%% ================================================================
+%   SMOOTH MUA
+% ================================================================
+MUAsmooth = smooth(MUA.data, round(smoothwin * 1250), 'moving');
+MUA.data = MUAsmooth;
+
+%% ================================================================
+%   DETECT UP/DOWN STATES
+% ================================================================
+disp('Detecting UP/DOWN via bimodal threshold…');
+
+data = log10(MUAsmooth);
+
+[thresh, cross, bihist, diptest] = bz_BimodalThresh( ...
+    data, ...
+    'Schmidt', stickyTrigger, ...
+    'startbins', startbins, ...
+    'maxhistbins', maxbins, ...
+    'diptest', diptestLog, ...
+    'pcheck', pcheck, ...
+    'refineDipEstimate', refineDipEstimate);
+
+% Convert indices to time
+UP   = MUA.timestamps(cross.upints);
+DOWN = MUA.timestamps(cross.downints);
+
+%% ================================================================
+%   SAVE OUTPUT STRUCT
+% ================================================================
+SlowWaves.ints.UP   = UP;
+SlowWaves.ints.DOWN = DOWN;
+
+SlowWaves.detectorinfo.detectorname = 'DetectSlowWavesMUA_HS2025';
+SlowWaves.detectorinfo.MUAchan = MUAchan;
+SlowWaves.detectorinfo.smoothwin = smoothwin;
+SlowWaves.detectorinfo.threshold = thresh;
+
+save(fullfile(basePath, [baseName '.SlowWavesMUA.events.mat']), 'SlowWaves');
+disp('Saved SlowWavesMUA.events.mat');
+
+%% ================================================================
+%   SAVE .EVT FOR NEUROSCOPE
+% ================================================================
+if saveEvent
+    eventtype = ['DOWN.MUAthresh.' num2str(smoothwin) '.sticky' num2str(stickyTrigger)];
+    neuroscopeheader = '.R45';
+    evtfile = [baseName '.' eventtype neuroscopeheader '.evt'];
+
+    lengthAll = numel(DOWN);
+    events.time = zeros(1,lengthAll);
+    events.time(1:2:end) = DOWN(:,1);
+    events.time(2:2:end) = DOWN(:,2);
+    events.description = repmat({'DOWN'},1,lengthAll);
+
+    SaveEvents(fullfile(basePath,evtfile),events);
+    disp(['Saved EVT: ' evtfile]);
+end
+
+%% ================================================================
+%   FIGURES
+% ================================================================
+if makeFig
+    figDir = fullfile(basePath,'DetectionFigures');
+    if ~exist(figDir,'dir')
+        mkdir(figDir)
+    end
+
+    % Histogram of MUA
+    fig1 = figure;
+    plot(bihist.bins, bihist.hist, 'k', 'LineWidth', 2); hold on;
+    plot([thresh thresh], ylim, 'r', 'LineWidth', 1.2);
+    title('log10(MUA) Distribution');
+    xlabel('log10(MUA)'); ylabel('Count');
+    saveas(fig1, fullfile(figDir,'distMUA_DOWNdetection.pdf'));
+    close(fig1);
+
+    % Duration hist
+    UPdur = UP(:,2) - UP(:,1);
+    DOWNdur = DOWN(:,2) - DOWN(:,1);
+
+    fig2 = figure;
+    histogram(log10(UPdur), 30, 'FaceColor','r'); hold on;
+    histogram(log10(DOWNdur), 30, 'FaceColor','k');
+    xlabel('log10(duration)'); ylabel('Count');
+    title('UP / DOWN Duration Distribution');
+    saveas(fig2, fullfile(figDir,'distDurations.pdf'));
+    close(fig2);
+
+    disp('Saved detection figures.');
+end
+
+end
