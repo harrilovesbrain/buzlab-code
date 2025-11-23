@@ -1,8 +1,10 @@
 function hs_MUA_simple(basepath)
 %% ================================================================
-%  filterMUA_fixed.m
+%  hs_MUA_simple(basepath)
 %  Purpose: Extract MUA envelope (500–5000 Hz band)
-%           from a .dat file using sessionInfo structure.
+%           from a .dat file using sessionInfo + bz_LoadBinary.
+%           FAST version – LEC only – with progress bar.
+%
 %  Created by Husang Harry Lee
 % ================================================================
 
@@ -12,23 +14,23 @@ end
 
 fprintf('\n📂 Processing folder: %s\n', basepath);
 
-% -----------------------------------------------------------------
-% 1️⃣  Load session information
-% -----------------------------------------------------------------
+%% -----------------------------------------------------------------
+% 1️⃣ Load session information
+% ------------------------------------------------------------------
 sessionInfoFile = dir(fullfile(basepath, '*.sessionInfo.mat'));
 if isempty(sessionInfoFile)
     error('sessionInfo.mat not found in %s', basepath);
 end
 load(fullfile(basepath, sessionInfoFile(1).name), 'sessionInfo');
 
-% find .dat file
+% Find .dat file
 datFile = dir(fullfile(basepath, '*.dat'));
 if isempty(datFile)
     error('No .dat file found in %s', basepath);
 end
 fileDat = fullfile(basepath, datFile(1).name);
 
-% handle field differences for sampling rate
+%% Sampling rates
 if isfield(sessionInfo, 'rates') && isfield(sessionInfo.rates, 'wideband')
     fs = sessionInfo.rates.wideband;
 elseif isfield(sessionInfo, 'session') && isfield(sessionInfo.session, 'SampleRate')
@@ -37,83 +39,89 @@ else
     error('Sampling rate not found in sessionInfo.');
 end
 
-% extract channel info
-nChannels = sessionInfo.nChannels;
-if isfield(sessionInfo, 'channels')
-    channels = sessionInfo.channels;
-else
-    channels = 0:(nChannels-1); % fallback if missing
-end
-targetFs = sessionInfo.lfpSampleRate;
-dsFactor = round(fs / targetFs);
+%% -----------------------------------------------------------------
+% 2️⃣ Use only LEC channels 128–255 (0-indexed)
+% ------------------------------------------------------------------
+lecChannels = 128:255;
+nChannels   = sessionInfo.nChannels;
+targetFs    = sessionInfo.lfpSampleRate;
+dsFactor    = round(fs / targetFs);
 
-fprintf('Loaded %s | %d ch | fs=%.0f Hz | target=%.0f Hz\n', ...
-    sessionInfoFile(1).name, nChannels, fs, targetFs);
+fprintf('✔ LEC channels: 128–255  (%d channels)\n', numel(lecChannels));
+fprintf('✔ fs = %.0f Hz → %.0f Hz\n', fs, targetFs);
 
-% -----------------------------------------------------------------
-% 2️⃣  Design band-pass filter (500–5000 Hz)
-% -----------------------------------------------------------------
+%% -----------------------------------------------------------------
+% 3️⃣ Design band-pass filter
+% ------------------------------------------------------------------
 lowCut  = 500;
 highCut = 5000;
 order   = 3;
 [b,a]   = butter(order, [lowCut highCut] / (fs/2), 'bandpass');
 
-% -----------------------------------------------------------------
-% 3️⃣  Process each channel
-% -----------------------------------------------------------------
-mua_cell = cell(numel(channels), 1);
+%% -----------------------------------------------------------------
+% 4️⃣ Process each LEC channel (FAST) with progress bar
+% ------------------------------------------------------------------
+nCh = numel(lecChannels);
+mua_cell = cell(nCh,1);
 
-for k = 1:numel(channels)
-    ch = channels(k);
-    fprintf('   → Channel %d of %d\n', ch+1, nChannels);
+h = waitbar(0, 'Extracting MUA (LEC channels 128–255)...');
 
-    % Load one channel from .dat file
+for k = 1:nCh
+    ch = lecChannels(k);
+
+    % Load one channel from .dat
     raw = bz_LoadBinary(fileDat, ...
-        'channels', ch + 1, ...  % convert 0-based to MATLAB indexing
+        'channels', ch + 1, ...    % convert 0→1 indexing
         'nChannels', nChannels, ...
         'precision', 'int16');
 
-    % Step 1: Band-pass filter
+    % 1. Filter
     sig_bp = filtfilt(b, a, double(raw));
 
-    % Step 2: Rectify
+    % 2. Rectify
     sig_rect = abs(sig_bp);
 
-    % Step 3: Smooth (~2 ms Gaussian)
+    % 3. Smooth (~2 ms window)
     win = round(fs * 0.002);
     sig_env = smoothdata(sig_rect, 'gaussian', win);
 
-    % Step 4: Downsample
+    % 4. Downsample
     sig_env_ds = downsample(sig_env, dsFactor);
 
-    % Store
     mua_cell{k} = single(sig_env_ds);
-end
 
-% -----------------------------------------------------------------
-% 4️⃣  Combine and Save
-% -----------------------------------------------------------------
+    waitbar(k/nCh, h, sprintf('Processing channel %d / %d', ch, lecChannels(end)));
+end
+close(h);
+
+%% -----------------------------------------------------------------
+% 5️⃣ Combine & save MUA
+% ------------------------------------------------------------------
 minLen = min(cellfun(@numel, mua_cell));
-MUA.data     = zeros(minLen, numel(channels), 'single');
-for k = 1:numel(channels)
+MUA.data = zeros(minLen, nCh, 'single');
+for k = 1:nCh
     MUA.data(:,k) = mua_cell{k}(1:minLen);
 end
+
 MUA.fs       = targetFs;
 MUA.band     = [lowCut highCut];
-MUA.channels = channels;
+MUA.channels = lecChannels;
 
 outFile = fullfile(basepath, [sessionInfo.FileName '.MUA.mat']);
 save(outFile, 'MUA', '-v7.3');
+
 fprintf('✅ Saved %s\n', outFile);
 
-% -----------------------------------------------------------------
-% 5️⃣  Optional quick check plot (only if interactive)
-% -----------------------------------------------------------------
+%% -----------------------------------------------------------------
+% 6️⃣ Optional plot
+% ------------------------------------------------------------------
 if usejava('desktop')
-    figure('Name','MUA Envelope','Color','w');
+    figure('Name','LEC MUA Envelope','Color','w');
     imagesc(zscore(MUA.data,[],1)'); axis xy;
-    xlabel('Time (samples)'); ylabel('Channel (superficial → deep)');
-    title(sprintf('MUA Envelope (%d–%d Hz)', lowCut, highCut));
-    colormap jet; colorbar;
+    xlabel('Time (samples)'); 
+    ylabel('LEC channels (128→255)');
+    title(sprintf('MUA Envelope (%d–%d Hz, LEC only)', lowCut, highCut));
+    colormap jet;
+    colorbar;
 end
 end
