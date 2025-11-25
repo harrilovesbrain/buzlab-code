@@ -1,6 +1,6 @@
 function hs_plotMUA1(mouseName)
 % ========================================================================
-%  hs_plotMUA1(mouseName) — FINAL FIXED VERSION 
+%  hs_plotMUA1(mouseName) — FINAL VERSION WITH CACHING
 %
 %  Clean & anatomically accurate Yuta-style LEC MUA depth profile:
 %    • RMS-based MUA power (correct)
@@ -8,6 +8,7 @@ function hs_plotMUA1(mouseName)
 %    • True depth axis (µm)
 %    • Normalized 0 → 1
 %    • Subtle micro-spikes (Yuta-like)
+%    • Saves cached results to Harry folder for instant re-plotting
 % ========================================================================
 
 %% ---------- locate all MUA files ----------
@@ -62,7 +63,7 @@ for i = 1:numel(sessions)
     X = S.MUA.data;   % time × channels
     [~, nCh] = size(X);
 
-    % match XML channels to data channels
+    % match XML channels to data
     lecCols_m  = lecCh + 1;               % MATLAB index
     valid      = lecCols_m <= nCh;
     lecCols_m  = lecCols_m(valid);
@@ -86,7 +87,7 @@ for i = 1:numel(sessions)
     %% ---------- (4) Interpolate to unified depth axis ----------
     prof = interp1(depthUsed, pow, fullDepth, 'makima', 'extrap');
 
-    allProfiles(end+1, :) = prof;  %#ok<AGROW>
+    allProfiles(end+1, :) = prof;
     nSessions = nSessions + 1;
 
     fprintf('   ✓ Session %d included (%s)\n', nSessions, sessions(i).name);
@@ -100,12 +101,12 @@ end
 meanRaw = mean(allProfiles, 1);
 semRaw  = std(allProfiles, [], 1) / sqrt(nSessions);
 
-% very light skeleton smoothing
+% Yuta-style backbone
 trend  = smoothdata(meanRaw, 'gaussian', 10);
 
-% subtle high-frequency wiggles
+% subtle wiggles
 detail = meanRaw - trend;
-boostFactor = 0.8;    % subtle, realistic Yuta-style
+boostFactor = 0.8;
 meanMUA = trend + boostFactor * detail;
 
 % final shaping
@@ -114,6 +115,28 @@ meanMUA = smoothdata(meanMUA, 'gaussian', 2);
 % normalize 0–1
 meanMUA = meanMUA ./ max(meanMUA);
 semMUA  = semRaw ./ max(meanMUA);
+
+%% =====================================================================
+%                SAVE CACHED RESULTS FOR FAST RE-PLOTTING
+% =====================================================================
+
+% Force save to your Harry analysis folder
+saveDir = 'Z:\Buzsakilabspace\LabShare\JunH\Photometry\HJ017\Harry';
+
+if ~exist(saveDir, 'dir')
+    mkdir(saveDir);
+end
+
+cacheFile = fullfile(saveDir, sprintf('%s_MUAdepth_cache.mat', mouseName));
+
+save(cacheFile, ...
+    'meanMUA', ...
+    'semMUA', ...
+    'fullDepth', ...
+    'nSessions', ...
+    'mouseName');
+
+fprintf('\n💾 Saved cache file to: %s\n', cacheFile);
 
 %% =====================================================================
 %                                PLOT
@@ -137,11 +160,11 @@ set(gca, 'YDir','reverse', 'TickDir','out', ...
          'FontSize',12, 'LineWidth',1.2, 'Box','off');
 
 ylim([min(fullDepth) max(fullDepth)]);
-xlim([0 1]);   % 🟢 normalized, PI requested
+xlim([0 1]);
 
 xlabel('Normalized MUA power (0–1, 500–5000 Hz)');
 ylabel('Depth (\mum)');
-title(sprintf('LEC MUA Depth (Yuta-style) — %s  (n = %d)', ...
+title(sprintf('LEC MUA Depth (Yuta-style) — %s (n = %d)', ...
        mouseName, nSessions));
 
 uistack(findobj(gca,'Type','line'),'top');
